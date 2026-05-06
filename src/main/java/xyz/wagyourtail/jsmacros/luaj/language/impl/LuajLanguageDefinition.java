@@ -25,6 +25,8 @@ public class LuajLanguageDefinition extends BaseLanguage<Globals, LuajScriptCont
     // global pools.
     public static final Map<String, Globals> namedGlobals = new java.util.concurrent.ConcurrentHashMap<>();
 
+    public static final ThreadLocal<String> activeLoadscriptPool = new ThreadLocal<>();
+
     public static final Map<String, LuajScriptContext> globalOwners = new java.util.concurrent.ConcurrentHashMap<>();
 
     //ensure only one script occupies a pool.
@@ -37,6 +39,9 @@ public class LuajLanguageDefinition extends BaseLanguage<Globals, LuajScriptCont
         super(extension, runner);
     }
 
+    // Pool names returned with this prefix signal a force-takeover.
+    private static final String FORCE_PREFIX = "force:";
+
     private String getGlobalName(LuajScriptContext ctx) {
         File file = ctx.getFile();
         if (file == null) return null;
@@ -46,6 +51,8 @@ public class LuajLanguageDefinition extends BaseLanguage<Globals, LuajScriptCont
             line = line.trim();
             if (line.equals("--@global")) return "default";
             if (line.startsWith("--@global ")) return line.substring("--@global ".length()).trim();
+            if (line.equals("--@global-force")) return FORCE_PREFIX + "default";
+            if (line.startsWith("--@global-force ")) return FORCE_PREFIX + line.substring("--@global-force ".length()).trim();
         } catch (java.io.IOException ignored) {}
         return null;
     }
@@ -57,12 +64,18 @@ public class LuajLanguageDefinition extends BaseLanguage<Globals, LuajScriptCont
 
         if (cfg.useGlobalContext) {
             if (cfg.splitGlobalContext) {
-                String poolName = getGlobalName(ctx.getCtx());
-                if (poolName != null) {
+                String rawPoolName = getGlobalName(ctx.getCtx());
+                if (rawPoolName != null) {
+                    boolean forceMode = rawPoolName.startsWith(FORCE_PREFIX);
+                    String poolName = forceMode ? rawPoolName.substring(FORCE_PREFIX.length()) : rawPoolName;
                     synchronized (getLockFor(poolName)) {
                         LuajScriptContext currentOwner = globalOwners.get(poolName);
                         boolean slotFree = currentOwner == null || currentOwner.isContextClosed();
-                        if (slotFree) {
+                        if (slotFree || forceMode) {
+                            if (!slotFree) {
+                                // kill the current owner so its events stop firing
+                                currentOwner.closeContext();
+                            }
                             globals = namedGlobals.computeIfAbsent(poolName, k -> JsePlatform.debugGlobals());
                             globalOwners.put(poolName, ctx.getCtx());
                             claimedPool = poolName;
@@ -87,6 +100,16 @@ public class LuajLanguageDefinition extends BaseLanguage<Globals, LuajScriptCont
         final String finalClaimedPool = claimedPool;
         try {
             e.accept(globals);
+        } catch (LuaError le) {
+            // LuaJ wraps InterruptedException (from waitTick/wrapSleep) in a LuaError via
+            // reflection. Re-throw as InterruptedException so the framework treats it as a
+            // clean script termination rather than logging it as a crash.
+            Throwable cause = le.getCause();
+            if (cause instanceof InterruptedException) {
+                Thread.currentThread().interrupt();
+                throw (InterruptedException) cause;
+            }
+            throw le;
         } finally {
             if (finalClaimedPool != null) {
                 synchronized (getLockFor(finalClaimedPool)) {
