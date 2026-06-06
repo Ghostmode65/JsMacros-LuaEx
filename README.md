@@ -4,7 +4,6 @@
 
 This extension adds `lua 5.2` support to 
 - [JsMacros](https://github.com/wagyourtail/JsMacros) `1.2.2+`
-- Soon [JsMacros CE](https://github.com/JsMacrosCE/JsMacros) `beta.5 +`
 
 # Notes
 
